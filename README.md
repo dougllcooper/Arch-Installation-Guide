@@ -1,5 +1,7 @@
 # A Personal Arch Installation Guide
 
+Had a text version of this I made years ago but found this and it's very well done and alot easier to read than an all text version.  Commands are easier to see.  Modifications include setting up a btrfs filesystem.  Also setup snapper and snap-pac-grub.  This allow automatic snapshots by snapper and pacman creates Pre and Post snapshots.  Snap-pac-grub also allows you to boot into the pacman created snapshots.  Also an additional hook that backs up the boot directory if you install a new kernel.
+
 This is a personal guide so if you are lost and just found this guide from somewhere, I recommend you to read the official [`wiki`](https://wiki.archlinux.org/index.php/Installation_guide)!  This guide will focus on `systemd-boot`, `UEFI` and a guide if you want to encrypt your partition with `LUKS/LVM`. This guide exists so that I can remember a bunch of things when reinstalling `Archlinux`.
 
 ## Pre-installation
@@ -106,6 +108,14 @@ Use `timedatectl` to ensure the system clock is accurate:
 
 To check the service status, use `timedatectl status`.
 
+### Find fastest mirror
+
+Use reflector to test mirrors:
+
+```
+reflector -c Canada,US -p https -f 10 --sort rate --save /etc/pacman.d/mirrorlist
+```
+
 ## Partition the disks
 
 When recognized by the live system, disks are assigned to a block device such as `/dev/sda`, `/dev/nvme0n1` or `/dev/mmcblk0`. To identify these devices, use lsblk or fdisk.  The most common main drive is **sda**.
@@ -117,6 +127,103 @@ When recognized by the live system, disks are assigned to a block device such as
 Results ending in `rom`, `loop` or `airoot` may be ignored.
 
 In this guide, I'll create a two different ways to partition a drive. One for a normal installation, the other one is setting up with an encryption(LUKS/LVM). Let's start with the unecrypted one:
+
+### Btrfs filesystem setup
+
+This section sets up a btrfs filesystem to install arch onto.  Setting up partitions for btrfs is easy.  You need an efi partition, a swap partition if you're going to use one, and everything else in one large partition:
+
+```
+fdisk /dev/sda
+```
++ `g` to setup a new gpt partition table
++ `n` to create a new partition
++ `Enter` twice to accept defaults for partition # and starting sector
++ `+512M` to create a 512M efi partiton
++ `t` to select partition type
++ `1` type 1 is for an EFI partition
++ I usually have swap partiton on another drive or create one here
++ `n` for new partition
++ `Enter` twice
++ `+8G` or whatever for swap partition
++ `t` to select type
++ `19` is linux swap type
++ `n` for new partition
++ `Enter` three times
++ This creates a large partition for the rest of the drive
++ In this example, this would be /dev/sda3
++ We'll use this for the btrfs subvolumes
+
+### Partitions example
+
+In this example we'll use the following partition setup:
+```
+/dev/sda1 - efi
+/dev/sda2 - swap
+/dev/sda3 - btrfs filesystem
+```
+
+#### Formating partitions
+
+#### EFI partition
+
+EFI has to be formatted Fat32.
+`mkfs.fat -F32 /dev/sda1`
+
+#### Enable swap
+Make and enable swap
+```
+mkswap /dev/sda2
+swapon /dev/sda2
+```
+
+### Format btrfs partition, mount partition, create subvolumes, and umount
+
+```
+mkfs.btrfs /dev/sda3
+mount /dev/sda3 /mnt
+btrfs subvolume create /mnt/@
+btrfs subvolume create /mnt/@home
+btrfs subvolume create /mnt/@snapshots
+btrfs subvolume create /mnt/@var
+unmount /mnt
+```
+
+@ is used for root
+@ home is home directory obviously
+@snapshots is used by snapper for all snapshots
+@var is the var directory.  Used to have separate subvolumes for /var/log, /var/tmp, and /var/cache but I guess that's not the in-thing to do anymore.  It's acceptable now to use one subvolume for var.  This is because if you do an update and it breaks something, you can boot up and rollback to a previous snapshot but it doesn't roll back your var directory.  System logs and stuff like that can be used to see what went wrong. Also holds pacman cache and tmp directory which is a waste of time and space to snapshot anyway.
+
+### Now we mount the subvolumes
+
+The whole idea here is that we mount the root subvolume, create subdirectories needed, and then mount the rest of the subvolumes.
+
+```
+mount -o rw,ssd,noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@ /dev/sda3 /mnt
+```
+####Mount options:
++ rw - mount read/write
++ ssd - use this if drive is an ssd
++ noatime - better for ssd's. Not as many writes.
++ compress=zstd:3 - Good speed and decent compression
++ space_cache=v2 - improves performance by caching empty blocks.
++ discard=async - use for ssd's
+
+#### Create directories and mount rest of subvolumes
+
+```
+mkdir /mnt/{boot,home,.snapshots,var}
+mount -o rw,ssd,noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@home /dev/sda3 /mnt/home
+mount -o rw,ssd,noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@snapshots /dev/sda3 /mnt/.snapshots
+mount -o rw,ssd,noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@var /dev/sda3 /mnt/var
+```
+
+#### Mount EFI partition on /mnt/boot
+
+```
+mount /dev/sda1 /mnt/boot
+```
+
+### If using btrfs, skip to `Installation` section in use pacstrap
 
 ### Unencrypted filesystem
 
@@ -203,7 +310,8 @@ In this guide, I'll create a two different ways to partition a drive. One for a 
 	- Set name to `lvm`. Hit enter.
 
 + Lastly, hit `Write` at the bottom of the patitions list to *write the changes* to the disk. Type `yes` to *confirm* the write command. Now we are done partitioning the disk. Hit `Quit` *to exit cgdisk*. Go to the [next section](#formatting-partitions).
-
+```
+```
 
 ## Verifying the partitions
 
@@ -394,16 +502,23 @@ You should see *something like this*:
 	```
 
 	 We don’t need to mount `swap` since it is already enabled.
-
+```
+```
 ## Installation
 
 Now let’s go ahead and install `base`, `linux`, `linux-firmware`, and `base-devel` packages into our system. 
 
++ linux, linux-lts, linux-zen:  Generally install one of these. I also install headers as well.
+
 ```
-# pacstrap /mnt base base-devel linux linux-zen linux-firmware
+# pacstrap /mnt base base-devel linux linux-zen linux-lts linux-firmware linux-headers linux-lts-headers linux-zen-headers
 ```
 
 I will install `linux-zen` since it has necessary modules for gaming.
+
+Another option I usually use is `linux-lts`. This installs long-term-support kernel which gives a little more stability for archlinux.
+
+This section also sets up zram.  If going this route you wouldn't need a swap file.  Didn't normally use zram, but maybe I'll give it a try. For swap, just use the appropriate sections. Swap partition, swap file, or zram.
 
 The `base` package does not include all tools from the live installation, so installing other packages may be necessary for a fully functional base system. In particular, consider installing: 
 
@@ -413,10 +528,20 @@ The `base` package does not include all tools from the live installation, so ins
 	- `iwd`: Internet Wireless Daemon
 	- `inetutils`: A collection of common network programs
 	- `iputils`: Network monitoring tools, including `ping`
+	- `wpa_supplicant`: always installed this just as a backup
+	- `wireless_tools`: tools for wireless - go figure
+	- `networkmanager`: I like networkmanager for internet connections
 
 + utilities for accessing `RAID` or `LVM` partitions,
 
 	- `lvm2`: Logical Volume Manager 2 utilities (*if you are setting up an encrypted filesystem with LUKS/LVM, include this on pacstrap*)
+
++ btrfs filesystem,
+
+	- `btrfs-progs`: programs for handling btrfs filesystems
+	- `snapper`: might as well install now. Will be needed shortly
+	- `grub2`: I use grub bootloader. Allows booting using pacman created snapshots
+	- `efibootmgr`: for efi
 
 + Zram
 
@@ -427,6 +552,7 @@ The `base` package does not include all tools from the live installation, so ins
 	- `nano`
 	- `vim`
 	- `vi`
+	- `neovim`
 
 + packages for accessing documentation in man and info pages,
 
@@ -444,6 +570,7 @@ The `base` package does not include all tools from the live installation, so ins
 	- `less`: A terminal based program for viewing text files
 	- `usbutils`: USB Device Utilities
 	- `bash-completion`: Programmable completion for the bash shell
+	- `zsh`: I usually use zsh
 
 + userspace utilities for the management of file systems that will be used on the system,
 	
@@ -457,6 +584,8 @@ The `base` package does not include all tools from the live installation, so ins
 	- `android-udev`: Udev rules to connect Android devices to your linux box
 	- `mtpfs`: A FUSE filesystem that supports reading and writing from any MTP devic
 	- `xdg-user-dirs`: Manage user directories like `~/Desktop` and `~/Music`
+	- `dosfstools`: for FAT filesystems
+	- `mtools`: tools to handle ms-doc and win partitions without mounting them.
 
 These tools will be useful later. So **future me**, install these.
 
@@ -481,10 +610,10 @@ Now, change root into the newly installed system
 A selection of timezones can be found under `/usr/share/zoneinfo/`. Since I am in the Philippines, I will be using `/usr/share/zoneinfo/Asia/Manila`. Select the appropriate timezone for your country:
 
 ```
-# ln -sf /usr/share/zoneinfo/Asia/Manila /etc/localtime
+# ln -sf /usr/share/zoneinfo/America/Toronto /etc/localtime
 ```
 
-Run `hwclock` to generate `/etc/adjtime`: 
+Run `hwclockz` to generate `/etc/adjtime`: 
 
 ```
 # hwclock --systohc
@@ -550,6 +679,17 @@ Creating a new initramfs is usually not required, because mkinitcpio was run on 
 
 + Open `/etc/mkinitcpio.conf` with an editor:
 
++ For Btrfs filesystem: at the top of mkinitcpio.conf is a line
+	+ `MODULES=()`
+	+ change this to
+	+ `MODULES=(btrfs)`
++ Also for btrfs, remove fsck from HOOKS= line:
+	+ Before
+	+ `HOOKS=(base udev autodetect keyboard modconf block encrypt lvm2 filesystems fsck)`
+	+ After
+	+ `HOOKS=(base udev autodetect keyboard modconf block encrypt lvm2 filesystems)`
+	+ You cannot do fsck on btrfs partition or it will corrupt data
++ 
 + In this guide, there are two ways to setting up initramfs, `udev` (default) and `systemd`. If you are planning to use `plymouth`(splashcreen), it is advisable to use a `systemd`-based initramfs.
 
 	- udev-based initramfs (default).
@@ -713,7 +853,7 @@ Set the password of user `MYUSERNAME`:
 If you want a root privilege in the future by using the `sudo` command, you should grant one yourself:
 
 ```
-# EDITOR=vim visudo
+# EDITOR=nvim visudo
 ```
 
 Uncomment the line (Remove #):
@@ -722,7 +862,19 @@ Uncomment the line (Remove #):
 # %wheel ALL=(ALL) ALL
 ```
 
-## Install the boot loader
+### Install boot loader if using btrfs
+
+Using btrfs I use brub bootloader. This allow booting to snapshots that are created by snapper as well as pacman generated snapshots
+
+```
+grub2-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=arch
+```
+
+This should complete with no errors. Then make the config file:
+
+`grub2-mkconfig -o /boot/grub/grub.mkconfig`
+
+## Install the boot loader (skip for btrfs)
 
 Yeah, this is where we install the bootloader. We will be using `systemd-boot`, so no need for `grub2`. 
 
@@ -797,7 +949,7 @@ console-mode max
 editor no
 ```
 
-#### Microcode
+#### Microcode (continue here with btrfs)
 
 Processor manufacturers release stability and security updates to the processor microcode. These updates provide bug fixes that can be critical to the stability of your system. Without them, you may experience spurious crashes or unexpected system halts that can be difficult to track down. 
 
@@ -833,9 +985,21 @@ initrd  /initramfs-linux.img
 
 Replace `CPU_MANUFACTURER` with either `amd` or `intel` depending on your processor.
 
+### Enable systemd services
+
+Enable services for network manager, fstrim for ssd, also scrub timers for btrfs. First scrub timer is for root subvolume. This sets a monthly timer.  This is standard for btrfs scrub. Use nmtui to start internet when you reboot.
+
+```
+systemctl enable NetworkManager
+systemctl enable fstrim.timer
+systemctl enable btrfs-scrub@-.timer
+systemctl enable btrfs-scrub@home.timer
+systemctl enable btrfs-scrub@snapshots.timer
+systemctl enable btrfs-scrub@var.time
+```
 ## Enable internet connection for the next boot
 
-To enable the network daemons on your next reboot, you need to enable `dhcpcd.service` for wired connection and `iwd.service` for a wireless one.
+To enable the network daemons on your next reboot, you need to enable `dhcpcd.service` for wired connection and `iwd.service` for a wireless one. Not needed if using NetworkManager.
 
 ```
 # systemctl enable dhcpcd iwd

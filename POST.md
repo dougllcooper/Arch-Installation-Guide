@@ -6,6 +6,8 @@ In post installation we will be using a lot of `sudo`. I'm not responsible if yo
 
 We will be downloading stuff so we need an internet connection! So set-up your connection first!
 
+If using NetworkManager service use `nmtui`
+
 ### Check for Updates
 
 It's recommended to check for updates first before installing anything so:
@@ -14,12 +16,140 @@ It's recommended to check for updates first before installing anything so:
 # pacman -Syu
 ```
 
+#### AUR Helper
+
+The "later" is now, old man. We will now install an AUR helper, `yay`.
+
+Clone `yay-bin` from the AUR using `git`.
+
+```
+$ git clone https://aur.archlinux.org/yay-bin.git
+$ cd yay-bin/
+$ makepkg -sri
+```
+
+### Setup snapper for auto snapshots
+
+Setup snapper fails because it tries to create `/.snapshot` directory and create `.snapshot` subvolume. We'll unmount `/.snapshot` and then remove `/.snapshot` directory.  Then we'll create the snapper config, then remove the created `/.snapshots` subvolume. Create a new `/.snapshots` directory. Remount our `@snapnshots` subvolume and set permissions. This assumes you logged in as your normal use:
+
+```
+sudo umount /.snapshots
+sudo rm -rf /.snapshots
+sudo snapper -c root create-config /
+sudo btrfs subvolume delete /.snapshots
+sudo mkdir /.snapshots
+sudo mount -a
+sudo chmod 750 /.snapshots
+```
+
+#### Edit snapper config
+
+use editor of choice:
++`sudo nvim /etc/snapper/configs/root`
++Add user name to ALLOW_USERS=""
++Go down to `LIMITS FOR TIMELINE CLEANUP` at bottom of file
++ change `HOURLY` to 5 and `DAILY` to 7
++ change `WEEKLY`, `MONTHLY`, and `YEARLY` to 0
++ These dictate how many automatic snapshots snapper keeps
++ Adjust these to whatever you want
++ Pacman snapshots are NOT included in these limits
+
+#### Enable timeline and cleanup services
+```
+sudo systemctl enable --now snapper-timeline.timer
+sudo systemctl enable --now snapper-cleanup.timer
+```
+
+#### You can check out and modify these timers
+
+`systemctl list-timers` to look at timers that are being used
+`sudo systemctl edit snapper-timeline.timer` to edit the timer.  Same for cleanup timer.
+
+#### Setup pacman hooks for snapshots
+
+`yay -S snap-pac-grub` will install:
++`snap-pac` which allows pacman to take Pre and Post update snapshots
++`snap-pac-grub` which shows snapshots on grub boot menu allowing you to boot into snapshots
+
+To allow your user to handle snapshots, you have to change the group of the /.snapshots directory.  The owner of the directory has to be root but you change the group to your users group.  Using the previous instructions, your users group will be `USERS`. You would do the following:
+
+```
+sudo chown :users /.snapshots
+```
+
+If you `ls -al /` you would see:
+
+`drwxr-x---.   1 root users   46 Aug 16 10:22 .snapshots`
+
+### Create pacman hook to backup boot partition
+
+This will create a hook that will backup your boot partition anytime pacman installs a new kernel
+
+`sudo pacman -S rsync`               - make sure rsync is installed
+
+```
+sudo mkdir /etc/pacman.d/hooks
+sudo nvim /etc/pacman/d/hooks/50-bootbackup.hook
+```
+
+Add the following text:
+```
+[Trigger]
+Operation = Upgrade
+Operation = Install
+Operation = Remove
+Type = Path
+Target = boot/*
+
+[Action]
+Depends = rsync
+Description = Backup /boot when kernel installed
+When = PreTransaction
+Exec = /usr/bin/rsync -a --delete /boot /.bootbackup
+```
+
+Save and exit
+
+### Booting into snapshots
+
+By default, snapper's snaphots are read-only.  Booting into them can be problematic.  You can either make the snapshots writable:
+
+`snapper list`          - see list of snapshots
+
+See if snapshot is read-only or read-write (uses snapshot 3 as an example):
+
+`sudo btrfs property get -ts /.snapshots/3/snapshot ro`
+
+`ro=true` means it read-only
+`ro=false` means it's read-write
+
+To make it read-write use:
+
+`sudo btrfs property set -ts /.snapshots/3/snapshot ro false`
+
+Then use previous command to double check.  Should say ro=false which means rw.
+
+This works but you have to set it rw beforehand.  A developer approved method of booting into snapshots uses the overlayfs.  
+
+Ensure `grub-btrfs` is installed on your system
+`sudo pacman -S grub-btrfs`
+
+- Add `grub-btrfs-overlayfs` to the end of the `HOOKS` array in `/etc/mkinitcpio.conf`, for example:
+
+`HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems grub-btrfs-overlayfs)`
+   
+- Regenerate your initramfs:
+   
+`mkinitcpio -P`
+
++ Remember - anytime you regenerate initramfs, also do grub2-mkconfig -P
+
 ### Display Server and Protocol
 
 We need to install a display server, a protocol or both. Normally, your desktop environment or window manager of choice will automatically install these as a dependency. But for this guide's sake we will install `X` server:
 
 ```
-# pacman -S xorg-server xorg-xrdb xorg-xinit xorg-xrandr xorg-xev xorg-xdpyinfo xorg-xprop
+# pacman -S xorg-server xorg-xrdb xorg-xinit xorg-xrandr xorg-xev xorg-xdpyinfo xorg-xprop xorg-apps xterm
 ```
 
 If you're planning to use a window manager like `awesome`, `bspwm` or `i3`, you should install X. While if you're planning to use `sway`, then wayland it is. If `GNOME`, you can install both. Again, your environment of choice will automatically install these as its dependencies.
@@ -45,6 +175,9 @@ Then add `i915` to the `MODULES`:
 MODULES=(i915 ...)
 ```
 
+### X windows test
+
+At this point you should be able to start x windows into twm (toms window manager).  Use `startx` and it should start up and show you 3 white terminal windows on screen.  Type exit in the largest one to exit.
 #### Audio Drivers
 
 ```
@@ -75,18 +208,6 @@ If you didn't include `git` on `pacstrap` earlier, it's time to install it now. 
 # pacman -S git
 ```
 
-#### AUR Helper
-
-The "later" is now, old man. We will now install an AUR helper, `yay`.
-
-Clone `yay-bin` from the AUR using `git`.
-
-```
-$ git clone https://aur.archlinux.org/yay-bin.git
-$ cd yay-bin/
-$ makepkg -sri
-```
-
 #### Missing Kernel Modules
 
 If you noticed, there's a warning message while running `mkinitcpio -p linux`, fix this by installing these firmwares:
@@ -100,6 +221,76 @@ $ yay -S wd719x-firmware aic94xx-firmware --removemake --noconfirm
 #### Desktop Environment and Window Manager
 
 Install your preferred desktop environment or window manager. 
+
+### Dusk window manager - Fork of dwm
+
+Install dependencies:
+
+`sudo pacman -S base-devel extra/git extra/libx11 extra/libxcb extra/libxinerama extra/libxft extra/imlib2 extra/yajl`
+
+Optional dependencies:
+
+sudo pacman -S - libxfixes libxi
+
+If you find yourself missing a library then this can usually be found by searching for the file name using pacman:
+
+```shell
+$ pacman -F Xlib-xcb.h
+extra/libx11 1.6.12-1 [installed: 1.7.2-1]
+    usr/include/X11/Xlib-xcb.h
+```
+
+Install dmenu basic or flexipatch version if you don't want to patch
+(Made by same developer that created dusk window manager):
+
+Basic version: `git clone https://git.suckless.org/dmenu`
+or 
+Flexipatch version: `git clone https://github.com/bakkeby/dmenu-flexipatch.git dmenu`
+
+Then run make compile and install.
+
+```shell
+$ cd dmenu
+$ make
+$ sudo make install
+$ cd ..
+```
+
+Then do the same for st (suckless terminal):
+
+Clone the repository.
+
+```shell
+git clone https://git.suckless.org/st
+```
+
+or
+
+```shell
+git clone https://github.com/bakkeby/st-flexipatch.git st
+```
+
+```
+$ cd st
+$ make
+$ sudo make install
+$ cd ..
+```
+
+The installation of dusk will be similar to installing dmenu or st.
+
+Clone the repository, then compile and install.
+
+```shell
+$ git clone https://github.com/bakkeby/dusk.git
+$ cd dusk
+$ make
+$ sudo make install
+```
+
+A `dusk.desktop` file is placed in `/usr/share/xsessions` so if you're using a login manager, you'll be able so see dusk as an option. If you don't use a login manager, add `exec dusk`  at the end of your `~/.xinitrc` file and then `startx`
+
+### KDE Plasma or Awesome window manager
 
 I'm an `awesome` and `KDE Plasma` guy, but right now I am using `Plasma`. So in this guide, I'll include a guide to set-up both `Plasma` and `Awesome`.
 
